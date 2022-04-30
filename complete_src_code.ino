@@ -46,7 +46,7 @@ bool isTagValid(byte*);         //V Check if tag is a valid key
 void validateTag(byte*);        //V Move unkown tag to valid keys list
 void deleteTag(byte*);          //V Remove tag from valid tags list 
 
-void systemBlock();         // Block the system
+void systemBlock(bool*);         // Block the system
 void systemUnblock();       // Unblock the system
 void systemReset();         // Reset the system, deleting all tags
 void generateError();       // Leaves the system in a error state
@@ -55,99 +55,100 @@ void pinsSetup();                   //V Configure pins as input/output
 bool checkActionSaved();            //V Check if master key is detected to save command
 void checkEepromSaved(int, byte);   //V Check if value was stored in EEPROM
 
-// {uid_1, uid_2, uid_3, uid_4, count}
-byte master_key[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0};
-
-MFRC522 rfid(SS_PIN, RST_PIN);
-
 //---------------------------------------------------
 
 void setup() {
 
-    pinsSetup();
+    MFRC522 rfid(SS_PIN, RST_PIN);
 
-}
-
-void loop() {
+    // {uid_1, uid_2, uid_3, uid_4, count}
+    byte master_key[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0};
 
     char invalid_tag_count = 0;
     bool system_blocked = false;
-    
-    if (system_blocked)
-    					return;
 
-    if (!verifyTag())
-        return;
-    
-    byte tag_uid[4] = {rfid.uid.uidByte[0], rfid.uid.uidByte[1], rfid.uid.uidByte[2], rfid.uid.uidByte[3]};
-    
-    // If master key is detected
-    if (isMasterTag(tag_uid)) {
+    pinsSetup();
+
+    while(1) {
+
+        if (system_blocked)
+    		return;
+
+        if (!verifyTag())
+            return;
         
-        // If master key has been detected 3 times
-        if (master_key[4] == 3) {
+        byte tag_uid[4] = {rfid.uid.uidByte[0], rfid.uid.uidByte[1], rfid.uid.uidByte[2], rfid.uid.uidByte[3]};
+        
+        // If master key is detected
+        if (isMasterTag(tag_uid)) {
+            
+            // If master key has been detected 3 times
+            if (master_key[4] == 3) {
+                outputSignal(ABOUT_TO_BLOCK_SIGNAL);
+                return;
+            }
+            // If master key is detected 4 times, the system is blocked
+            else if (master_key[4] > 3) {
+                systemBlock(system_blocked);
+                return;
+            }
+        }
+
+        if (digitalRead(BUTTON_PIN) && (master_key[4] > 0)) {
+            
+            delay(50);
+            
+            // Get duration of button press. System will be on halt during button press
+            unsigned long timer_begin = millis(); 
+            while (digitalRead(BUTTON_PIN) && !(timer_begin + millis() < 15E3)){}
+            unsigned long button_press_duration = millis() - timer_begin;
+
+            // There will be a press to reset 
+            if (button_press_duration < 5E3)
+                master_key[4] = 0;
+
+            else if ((button_press_duration >= 15E3) && (master_key[4] == 1)) 
+                systemUnblock(); 
+        }
+
+        // If valid key is detected
+        if (isTagValid(tag_uid)) {
+
+            // If master key has been detected before, key will be deleted from database
+            if (master_key[4] == 1)
+                deleteTag(tag_uid)
+            // Otherwise, the gate will open
+            openGate();
+            return;
+        }
+
+        // Since if it's not valid or invalid, its unknown
+        if (master_key[4] == 1) {
+            validateTag(tag_uid);
+            return;
+        }
+        
+        // Since it's not valid or master tag, it's unknown
+        invalidateTag(tag_uid);
+        
+        invalid_tag_count++;
+        switch (invalid_tag_count)
+        {
+        case 2:
             outputSignal(ABOUT_TO_BLOCK_SIGNAL);
-            return;
+            break;
+
+        case 3:
+            // One of these should reset the invalid count (redundaant, since no card will work) 
+            systemReset();
+            systemBlock(system_blocked);
+            outputSignal(SYSTEM_RESETED_SIGNAL);
+            break;
         }
-        // If master key is detected 4 times, the system is blocked
-        else if (master_key[4] > 3) {
-            systemBlock();
-            return;
-        }
-    }
-
-    if (digitalRead(BUTTON_PIN) && (master_key[4] > 0)) {
-        
-        delay(50);
-        
-        // Get duration of button press. System will be on halt during button press
-        unsigned long timer_begin = millis(); 
-        while (digitalRead(BUTTON_PIN) && !(timer_begin + millis() < 15E3)){}
-        unsigned long button_press_duration = millis() - timer_begin;
-
-        // There will be a press to reset 
-        if (button_press_duration < 5E3)
-            master_key[4] = 0;
-
-        else if ((button_press_duration >= 15E3) && (master_key[4] == 1)) 
-            systemUnblock(); 
-    }
-
-    // If valid key is detected
-    if (isTagValid(tag_uid)) {
-
-        // If master key has been detected before, key will be deleted from database
-        if (master_key[4] == 1)
-            deleteTag(tag_uid)
-        // Otherwise, the gate will open
-        openGate();
-        return;
-    }
-
-    // Since if it's not valid or invalid, its unknown
-    if (master_key[4] == 1) {
-        validateTag(tag_uid);
-        return;
-    }
-    
-    // Since it's not valid or master tag, it's unknown
-    invalidateTag(tag_uid);
-    
-    invalid_tag_count++;
-    switch (invalid_tag_count)
-    {
-    case 2:
-        outputSignal(ABOUT_TO_BLOCK_SIGNAL);
-        break;
-
-    case 3:
-        // One of these should reset the invalid count (redundaant, since no card will work) 
-        systemReset();
-        systemBlock();
-        outputSignal(SYSTEM_RESETED_SIGNAL);
-        break;
     }
 }
+
+void loop() {}
 
 
 
@@ -425,17 +426,17 @@ void pinsSetup() {
 
 
 void systemBlock(bool *system_blocked){
-					system_blocked = true;
-					EEPROM.write(SYSTEM_BLOCK_ADD, ADRESS_IN_USE);
-					outputSignal(SYSTEM_BLOCKED);
+    system_blocked = true;
+    EEPROM.write(SYSTEM_BLOCK_ADD, ADRESS_IN_USE);
+    outputSignal(SYSTEM_BLOCKED);
 }
 
 
 void systemReset() {
 					
-					for (int address = START_ADDRESS; address < END_ADDRESS; address += 5) {
-										EEPROM.update(address, 0x00);
-										checkActionSaved(adress, 0x00);
-					}
-					outputSignal(SYSTEM_RESETED);
+    for (int address = START_ADDRESS; address < END_ADDRESS; address += 5) {
+        EEPROM.update(address, 0x00);
+        checkActionSaved(adress, 0x00);
+    }
+    outputSignal(SYSTEM_RESETED);
 }
