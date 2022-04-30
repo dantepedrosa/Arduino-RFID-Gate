@@ -9,6 +9,12 @@
 #define LED_PIN     13
 #define GATE_PIN    14
 
+// Master key related defines
+#define MASTER_KEY_UID_1    0xFF
+#define MASTER_KEY_UID_2    0xFF
+#define MASTER_KEY_UID_3    0xFF
+#define MASTER_KEY_UID_4    0xFF
+
 // Signal codes
 #define SAVE_SUCCESS_SIGNAL     0x00
 #define SAVE_ERROR_SIGNAL       0x01
@@ -41,7 +47,7 @@ void openGate();            //V Opens the gate
 void outputSignal(char);    //V Outputs a buzzer and/or led signal 
 
 bool verifyTag();               //V Check if is a supported tag
-bool isMasterTag(byte*, bool);  //V Check if tag is the master key
+bool isMasterTag(byte*, char*, bool);  //V Check if tag is the master key
 bool isTagValid(byte*);         //V Check if tag is a valid key
 void validateTag(byte*);        //V Move unkown tag to valid keys list
 void deleteTag(byte*);          //V Remove tag from valid tags list 
@@ -55,17 +61,19 @@ void pinsSetup();                   //V Configure pins as input/output
 bool checkActionSaved();            //V Check if master key is detected to save command
 void checkEepromSaved(int, byte);   //V Check if value was stored in EEPROM
 
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+
 //---------------------------------------------------
 
 void setup() {
 
-    MFRC522 rfid(SS_PIN, RST_PIN);
-
-    // {uid_1, uid_2, uid_3, uid_4, count}
-    byte master_key[5] = {0xFF, 0xFF, 0xFF, 0xFF, 0};
-
+    char master_key_count = 0;
     char invalid_tag_count = 0;
+
     bool system_blocked = false;
+    byte tag_uid[4];
 
     pinsSetup();
 
@@ -77,24 +85,27 @@ void setup() {
         if (!verifyTag())
             return;
         
-        byte tag_uid[4] = {rfid.uid.uidByte[0], rfid.uid.uidByte[1], rfid.uid.uidByte[2], rfid.uid.uidByte[3]};
+        tag_uid[0] = rfid.uid.uidByte[0];
+        tag_uid[1] = rfid.uid.uidByte[1];
+        tag_uid[2] = rfid.uid.uidByte[2];
+        tag_uid[3] = rfid.uid.uidByte[3];
         
         // If master key is detected
-        if (isMasterTag(tag_uid)) {
+        if (isMasterTag(tag_uid, master_key_count)) {
             
             // If master key has been detected 3 times
-            if (master_key[4] == 3) {
+            if (master_key_count == 3) {
                 outputSignal(ABOUT_TO_BLOCK_SIGNAL);
                 return;
             }
             // If master key is detected 4 times, the system is blocked
-            else if (master_key[4] > 3) {
+            else if (master_key_count > 3) {
                 systemBlock(system_blocked);
                 return;
             }
         }
 
-        if (digitalRead(BUTTON_PIN) && (master_key[4] > 0)) {
+        if (digitalRead(BUTTON_PIN) && (master_key_count > 0)) {
             
             delay(50);
             
@@ -105,9 +116,9 @@ void setup() {
 
             // There will be a press to reset 
             if (button_press_duration < 5E3)
-                master_key[4] = 0;
+                master_key_count = 0;
 
-            else if ((button_press_duration >= 15E3) && (master_key[4] == 1)) 
+            else if ((button_press_duration >= 15E3) && (master_key_count == 1)) 
                 systemUnblock(); 
         }
 
@@ -115,15 +126,16 @@ void setup() {
         if (isTagValid(tag_uid)) {
 
             // If master key has been detected before, key will be deleted from database
-            if (master_key[4] == 1)
-                deleteTag(tag_uid)
+            if (master_key_count == 1)
+                if (checkActionSaved())
+                    deleteTag(tag_uid)
             // Otherwise, the gate will open
             openGate();
             return;
         }
 
         // Since if it's not valid or invalid, its unknown
-        if (master_key[4] == 1) {
+        if (master_key_count == 1) {
             validateTag(tag_uid);
             return;
         }
@@ -266,23 +278,23 @@ void outputSignal(char signal_code) {
 /*************************************************************
         openGate() - returns void
 *************************************************************/
-bool isMasterTag(byte *tag_uid, bool action_started = false) {
+bool isMasterTag(byte* tag_uid, char* master_key_count, bool action_started = false) {
     
-    if (master_key[0] == tag_uid[0] &&
-        master_key[1] == tag_uid[1] &&
-        master_key[2] == tag_uid[2] &&
-        master_key[3] == tag_uid[3]) {
+    if (MASTER_KEY_UID_1 == tag_uid[0] &&
+        MASTER_KEY_UID_2 == tag_uid[1] &&
+        MASTER_KEY_UID_3 == tag_uid[2] &&
+        MASTER_KEY_UID_4 == tag_uid[3]) {
         
         if (ACTION_STARTED) {
-            master_key[4] = 0;
-            EEPROM.write(MASTER_TAG_ADD, master_key[4]);
+            master_key_count = 0;
+            EEPROM.write(MASTER_TAG_ADD, master_key_count);
         }
         else {
-            master_key[4]++;
-            EEPROM.write(MASTER_TAG_ADD, master_key[4]);
+            master_key_count++;
+            EEPROM.write(MASTER_TAG_ADD, master_key_count);
         }
         
-        checkEepromSaved(MASTER_TAG_ADD, master_key[4]);
+        checkEepromSaved(MASTER_TAG_ADD, master_key_count);
 
         return true;
     }
@@ -403,7 +415,7 @@ bool checkActionSaved() {
         if (!verifyTag())
             continue;
         
-        if (isMasterTag(rfid.uid.uidByte, true)) {
+        if (isMasterTag(rfid.uid.uidByte, 0, true)) {
             return true;
         }
     }
