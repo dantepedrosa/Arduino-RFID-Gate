@@ -1,7 +1,8 @@
-//#include <MFRC522.h> 
-//#include <SPI.h>
-//#include <EEPROM.h>
+#include <MFRC522.h> 
+#include <SPI.h>
+#include <EEPROM.h>
 
+// Pin related defines
 #define SS_PIN      10
 #define RST_PIN     9
 #define BUZZER_PIN  11
@@ -21,25 +22,27 @@
 #define READ_ERROR_SIGNAL       0x02
 #define ABOUT_TO_BLOCK_SIGNAL   0x03
 #define SYSTEM_RESETED_SIGNAL   0x04
+#define SYSTEM_BLOCKED_SIGNAL   0x06
 #define BUTTON_15S_SIGNAL       0x05
 
 // Error codes
 #define MEMORY_WRITE_ERROR      0x00
 
-
 // Time related defines, in ms
 #define GATE_PIN_DURATION   750
 #define TIME_TO_SAVE_ACTION 10E3
+#define RESET_DURATION      15E3
+#define PRESS_DURATION      5E3
 
 // EEPROM related defines
 // {used/free, uid_1, uid_2, uid_3, uid_4}
-#define MASTER_TAG_ADD  0
-#define SYSTEM_BLOCK_ADD 1
-#define MAX_TAG_NUMBER  10
-#define START_ADRESS 10
-#define END_ADRESS      ((MAX_TAG_NUMBER * 5) + STARTADRESS)
-#define ADRESS_IN_USE   0x01
-#define ADRESS_FREE     0x00
+#define MASTER_TAG_ADD      0
+#define SYSTEM_BLOCK_ADD    1
+#define MAX_TAG_NUMBER      10
+#define START_ADDRESS       10
+#define END_ADDRESS         ((MAX_TAG_NUMBER * 5) + START_ADDRESS)
+#define ADDRESS_IN_USE      0x01
+#define ADDRESS_FREE        0x00
 
 
 //----------------------------------------------------------
@@ -47,20 +50,20 @@ void openGate();            //V Opens the gate
 void outputSignal(char);    //V Outputs a buzzer and/or led signal 
 
 bool verifyTag();               //V Check if is a supported tag
-bool isMasterTag(byte*, char*, bool);  //V Check if tag is the master key
+bool isMasterTag(byte*, char*, bool=false);  //V Check if tag is the master key
 bool isTagValid(byte*);         //V Check if tag is a valid key
 void validateTag(byte*);        //V Move unkown tag to valid keys list
 void deleteTag(byte*);          //V Remove tag from valid tags list 
 
 void systemBlock(bool*);         // Block the system
-void systemUnblock();       // Unblock the system
+void systemUnblock(bool*);       // Unblock the system
 void systemReset();         // Reset the system, deleting all tags
-void generateError();       // Leaves the system in a error state
+void generateError(char);       // Leaves the system in a error state
 
 void pinsSetup();                   //V Configure pins as input/output
 bool checkActionSaved();            //V Check if master key is detected to save command
-void checkEepromSaved(int, byte);   //V Check if value was stored in EEPROM
-
+void writeEEPROM(int, char, bool=false);   //V Check if value was stored in EEPROM
+unsigned long checkPressDuration();
 
 MFRC522 rfid(SS_PIN, RST_PIN);
 
@@ -91,7 +94,7 @@ void setup() {
         tag_uid[3] = rfid.uid.uidByte[3];
         
         // If master key is detected
-        if (isMasterTag(tag_uid, master_key_count)) {
+        if (isMasterTag(tag_uid, &master_key_count)) {
             
             // If master key has been detected 3 times
             if (master_key_count == 3) {
@@ -100,26 +103,21 @@ void setup() {
             }
             // If master key is detected 4 times, the system is blocked
             else if (master_key_count > 3) {
-                systemBlock(system_blocked);
+                systemBlock(&system_blocked);
                 return;
             }
         }
 
         if (digitalRead(BUTTON_PIN) && (master_key_count > 0)) {
             
-            delay(50);
-            
-            // Get duration of button press. System will be on halt during button press
-            unsigned long timer_begin = millis(); 
-            while (digitalRead(BUTTON_PIN) && !(timer_begin + millis() < 15E3)){}
-            unsigned long button_press_duration = millis() - timer_begin;
+            unsigned long button_press_duration = checkPressDuration();
 
             // There will be a press to reset 
-            if (button_press_duration < 5E3)
+            if (button_press_duration < PRESS_DURATION)
                 master_key_count = 0;
 
-            else if ((button_press_duration >= 15E3) && (master_key_count == 1)) 
-                systemUnblock(); 
+            else if ((button_press_duration >= RESET_DURATION) && (master_key_count == 1)) 
+                systemUnblock(&system_blocked); 
         }
 
         // If valid key is detected
@@ -128,7 +126,7 @@ void setup() {
             // If master key has been detected before, key will be deleted from database
             if (master_key_count == 1)
                 if (checkActionSaved())
-                    deleteTag(tag_uid)
+                    deleteTag(tag_uid);
             // Otherwise, the gate will open
             openGate();
             return;
@@ -140,9 +138,7 @@ void setup() {
             return;
         }
         
-        // Since it's not valid or master tag, it's unknown
-        invalidateTag(tag_uid);
-        
+        // Since it's not valid or master tag, it's unknown        
         invalid_tag_count++;
         switch (invalid_tag_count)
         {
@@ -153,7 +149,7 @@ void setup() {
         case 3:
             // One of these should reset the invalid count (redundaant, since no card will work) 
             systemReset();
-            systemBlock(system_blocked);
+            systemBlock(&system_blocked);
             outputSignal(SYSTEM_RESETED_SIGNAL);
             break;
         }
@@ -171,7 +167,7 @@ void loop() {}
 /*************************************************************
         verifyTag() - returns void
 *************************************************************/
-void verifyTag()
+bool verifyTag()
 {
 
     // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
@@ -278,24 +274,21 @@ void outputSignal(char signal_code) {
 /*************************************************************
         openGate() - returns void
 *************************************************************/
-bool isMasterTag(byte* tag_uid, char* master_key_count, bool action_started = false) {
+bool isMasterTag(byte tag_uid[4], char* master_key_count, bool action_started = false) {
     
     if (MASTER_KEY_UID_1 == tag_uid[0] &&
         MASTER_KEY_UID_2 == tag_uid[1] &&
         MASTER_KEY_UID_3 == tag_uid[2] &&
         MASTER_KEY_UID_4 == tag_uid[3]) {
         
-        if (ACTION_STARTED) {
-            master_key_count = 0;
-            EEPROM.write(MASTER_TAG_ADD, master_key_count);
+        if (action_started) {
+            *master_key_count = 0;
+            writeEEPROM(MASTER_TAG_ADD, *master_key_count);
         }
         else {
-            master_key_count++;
-            EEPROM.write(MASTER_TAG_ADD, master_key_count);
+            *master_key_count++;
+            writeEEPROM(MASTER_TAG_ADD, *master_key_count);
         }
-        
-        checkEepromSaved(MASTER_TAG_ADD, master_key_count);
-
         return true;
     }
     else
@@ -306,16 +299,16 @@ bool isMasterTag(byte* tag_uid, char* master_key_count, bool action_started = fa
 /*************************************************************
         isTagValid(byte *) - returns void
 *************************************************************/
-bool isTagValid(byte *tag_uid) {
+bool isTagValid(byte tag_uid[4]) {
 
     for (int address = START_ADDRESS; address < END_ADDRESS; address+= 5) {
         // Check if address there will be a card stored in
         if (EEPROM.read(address) == ADDRESS_IN_USE) {
             // Checking in a cascate way trying to avoid reading EEPROM to much
-            if (tag_uid[0] == EEPROM.read(adress + 1)){
-                if (tag_uid[1] == EEPROM.read(adress + 2)){
-                    if (tag_uid[2] == EEPROM.read(adress + 3)){
-                        if (tag_uid[3] == EEPROM.read(adress + 4)){
+            if (tag_uid[0] == EEPROM.read(address + 1)){
+                if (tag_uid[1] == EEPROM.read(address + 2)){
+                    if (tag_uid[2] == EEPROM.read(address + 3)){
+                        if (tag_uid[3] == EEPROM.read(address + 4)){
                             return true;
                         }
                     }
@@ -329,25 +322,20 @@ bool isTagValid(byte *tag_uid) {
 /*************************************************************
         validateTag(byte) - returns void
 *************************************************************/
-void validateTag(byte *tag_uid) {
+void validateTag(byte tag_uid[4]) {
 
     if (checkActionSaved()) {
         for (int address = START_ADDRESS; address < END_ADDRESS; address += 5) {
             
-            if (EEPROM.read(address) == ADRESS_FREE) {
+            if (EEPROM.read(address) == ADDRESS_FREE) {
 
-                EEPROM.write(address, ADDRESS_IN_USE);
+                writeEEPROM(address, ADDRESS_IN_USE);
 
-                EEPROM.update((address + 1), tag_uid[0]);
-                EEPROM.update((address + 2), tag_uid[1]);
-                EEPROM.update((address + 3), tag_uid[2]);
-                EEPROM.update((address + 4), tag_uid[3]);
+                writeEEPROM((address + 1), tag_uid[0], true);
+                writeEEPROM((address + 2), tag_uid[1], true);
+                writeEEPROM((address + 3), tag_uid[2], true);
+                writeEEPROM((address + 4), tag_uid[3], true);
 
-                checkEepromSaved(adress, ADDRESS_IN_USE);
-                checkEepromSaved((address + 1), tag_uid[0]);
-                checkEepromSaved((address + 2), tag_uid[1]);
-                checkEepromSaved((address + 3), tag_uid[2]);
-                checkEepromSaved((address + 4), tag_uid[3]);
             }
         }
         outputSignal(SAVE_SUCCESS_SIGNAL);
@@ -359,18 +347,17 @@ void validateTag(byte *tag_uid) {
 /*************************************************************
         deleteTag(byte) - returns void
 *************************************************************/
-void deleteTag(byte *tag_uid) {
+void deleteTag(byte tag_uid[4]) {
 
     if (checkActionSaved()) {
         for (int address = START_ADDRESS; address < END_ADDRESS; address += 5) {
-            if (EEPROM.read(address) == ADRESS_IN_USE) {
+            if (EEPROM.read(address) == ADDRESS_IN_USE) {
                 // Checking in a cascate way trying to avoid reading EEPROM to much
                 if (tag_uid[0] == EEPROM.read(address + 1)){
                     if (tag_uid[1] == EEPROM.read(address + 2)){
                         if (tag_uid[2] == EEPROM.read(address + 3)){
                             if (tag_uid[3] == EEPROM.read(address + 4)){
-                                EEPROM.write(address, ADRESS_FREE);
-                                checkEepromSaved(address, ADRESS_FREE)
+                                writeEEPROM(address, ADDRESS_FREE);
                             }
                         }
                     }
@@ -384,10 +371,15 @@ void deleteTag(byte *tag_uid) {
 }
 
 /*************************************************************
-        checkEepromSaved(int, byte) - returns void
+        writeEEPROM(int, char) - returns void
 *************************************************************/
-void checkEepromSaved(int address, byte number) {
+void writeEEPROM(int address, char number, bool update = false) {
     
+    if (update)
+        EEPROM.update(address, number);
+    else
+        EEPROM.write(address, number);
+
     char count = 0;
 
     while (EEPROM.read(address) != number) {
@@ -438,17 +430,43 @@ void pinsSetup() {
 
 
 void systemBlock(bool *system_blocked){
-    system_blocked = true;
-    EEPROM.write(SYSTEM_BLOCK_ADD, ADRESS_IN_USE);
-    outputSignal(SYSTEM_BLOCKED);
+    
+    *system_blocked = true;
+    writeEEPROM(SYSTEM_BLOCK_ADD, ADDRESS_IN_USE);
+    outputSignal(SYSTEM_BLOCKED_SIGNAL);
+
+}
+
+void systemUnblock(bool* system_blocked) {
+
+    *system_blocked = false;
+    writeEEPROM(SYSTEM_BLOCK_ADD, ADDRESS_IN_USE);
+
 }
 
 
 void systemReset() {
 					
-    for (int address = START_ADDRESS; address < END_ADDRESS; address += 5) {
-        EEPROM.update(address, 0x00);
-        checkActionSaved(adress, 0x00);
-    }
-    outputSignal(SYSTEM_RESETED);
+    for (int address = START_ADDRESS; address < END_ADDRESS; address += 5)
+        writeEEPROM(address, 0x00, true);
+    
+    outputSignal(SYSTEM_RESETED_SIGNAL);
+}
+
+
+void generateError(char error) {
+    while(error) {}
+}
+
+
+unsigned long checkPressDuration() {
+
+    delay(50);
+    
+    // Get duration of button press. System will be on halt during button press
+    unsigned long timer_begin = millis(); 
+    while (digitalRead(BUTTON_PIN) && !(timer_begin + millis() < 16E3)){}
+    
+    return(millis() - timer_begin);
+    
 }
