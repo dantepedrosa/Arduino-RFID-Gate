@@ -60,10 +60,10 @@ void systemUnblock(bool*);       // Unblock the system
 void systemReset();         // Reset the system, deleting all tags
 void generateError(char);       // Leaves the system in a error state
 
-void pinsSetup();                   //V Configure pins as input/output
-bool checkActionSaved();            //V Check if master key is detected to save command
-void writeEEPROM(int, char, bool=false);   //V Check if value was stored in EEPROM
-unsigned long checkPressDuration();
+void pinsSetup();                   //V Configure pins as input/output -- MAIN
+bool checkActionSaved();            //V Check if master key is detected to save command -- UTIL
+void writeEEPROM(int, char, bool=false);   //V Check if value was stored in EEPROM -- UTIL
+unsigned long checkPressDuration(); // --UTIL
 
 MFRC522 rfid(SS_PIN, RST_PIN);
 
@@ -72,13 +72,13 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 
 void setup() {
 
-    char master_key_count = 0;
-    char invalid_tag_count = 0;
+    char master_key_count = 0;      // Counts how many times Master Key was detected without reseting
+    char invalid_tag_count = 0;     // Counts how many invalid keys were detected
 
-    bool system_blocked = false;
-    byte tag_uid[4];
+    bool system_blocked = false;    // This variable blocks the system if set to true
+    byte tag_uid[4];        // Array to copy and store RFID bytes to manipulate
 
-    pinsSetup();
+    pinsSetup();        // Sets up all pins
 
     while(1) {
 
